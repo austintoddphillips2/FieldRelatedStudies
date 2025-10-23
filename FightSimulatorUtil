@@ -1,0 +1,579 @@
+import { Fighter } from "@/lib/saveManager";
+import { FightRatingCalculator } from "@/utils/fightRatingCalculator";
+import { InjuryManager } from "@/utils/injuryManager";
+import { INJURY_PROBABILITIES } from "@/data/injuries";
+import { 
+  KICK_KO_METHODS, 
+  PUNCH_KO_METHODS, 
+  TKO_POSITIONS, 
+  SUBMISSION_TYPES,
+  selectFromWeightedList
+} from "@/utils/finishMethodConstants";
+import { FighterStyle } from "@/types/fighterStyle";
+
+export interface FightResult {
+  winner: Fighter;
+  loser: Fighter;
+  method: "KO" | "SUB" | "DEC";
+  finishType?: string;
+  finishDetails?: string;
+  round?: number;
+  time?: string;
+  display: string;
+  starRating: number;
+  popularityChanges?: {
+    [fighterId: string]: {
+      change: number;
+      weekChanged: number;
+    };
+  };
+  injuries?: {
+    [fighterId: string]: {
+      type: "minor" | "major";
+      name: string;
+      weeksRemaining: number;
+      weekInjured: number;
+    };
+  };
+}
+
+export class FightSimulator {
+  static simulateFight(
+    fighter1: Fighter, 
+    fighter2: Fighter, 
+    isMainEvent: boolean = false, 
+    currentWeek: number = 1,
+    starBonus: number = 0,
+    hype: number = 0,
+    eventProductionLevel: number = 1,
+    recoverySpaLevel: number = 1,
+    isPPV: boolean = false
+  ): FightResult {
+    // Create copies to avoid modifying originals
+    const f1 = { ...fighter1, stats: { ...fighter1.stats } };
+    const f2 = { ...fighter2, stats: { ...fighter2.stats } };
+
+    // Normalize energy and morale to 0.8-1.2 modifiers
+    const norm = (v: number) => 0.8 + (v / 10) * 0.4;
+    const f1_energy_mod = norm(f1.energy);
+    const f1_morale_mod = norm(f1.morale);
+    const f2_energy_mod = norm(f2.energy);
+    const f2_morale_mod = norm(f2.morale);
+
+    // Compute base skills
+    const base_f1_striking = ((f1.stats.boxing + f1.stats.kickboxing) / 2) * f1_morale_mod;
+    const base_f1_grappling = ((f1.stats.wrestling + f1.stats.jiujitsu) / 2) * f1_morale_mod;
+    const base_f2_striking = ((f2.stats.boxing + f2.stats.kickboxing) / 2) * f2_morale_mod;
+    const base_f2_grappling = ((f2.stats.wrestling + f2.stats.jiujitsu) / 2) * f2_morale_mod;
+
+    // Calculate skill differentials for matchup analysis
+    const f1_striking_total = f1.stats.boxing + f1.stats.kickboxing;
+    const f1_grappling_total = f1.stats.wrestling + f1.stats.jiujitsu;
+    const f2_striking_total = f2.stats.boxing + f2.stats.kickboxing;
+    const f2_grappling_total = f2.stats.wrestling + f2.stats.jiujitsu;
+
+    // PHASE 1 FIX: Increased health pools (durability * 50 instead of * 20)
+    let f1_current_stamina = f1.stats.stamina * f1_energy_mod * 10;
+    let f2_current_stamina = f2.stats.stamina * f2_energy_mod * 10;
+    let f1_health = f1.stats.durability * 50;  // INCREASED from 20
+    let f2_health = f2.stats.durability * 50;  // INCREASED from 20
+
+    // Round tracking
+    let f1_rounds_won = 0;
+    let f2_rounds_won = 0;
+    let method: "KO" | "SUB" | "DEC" = "DEC";
+    let finish_round: number | undefined = undefined;
+    let finishPosition: "standing" | "ground" | undefined = undefined;
+
+    // Declare winner and loser variables
+    let winner: Fighter;
+    let loser: Fighter;
+
+    for (let round = 1; round <= 3; round++) {
+      let position: "standing" | "ground" = "standing";
+      let round_damage_f1 = 0;
+      let round_damage_f2 = 0;
+
+      // Drain stamina each round
+      const f1_giveUpBonus = round >= 2 && f1.morale < 4 ? 0.15 : 0;
+      const f2_giveUpBonus = round >= 2 && f2.morale < 4 ? 0.15 : 0;
+      
+      f1_current_stamina -= (0.2 + Math.random() * 0.1 + f1_giveUpBonus) * f1.stats.stamina * (1.2 - f1_energy_mod);
+      f2_current_stamina -= (0.2 + Math.random() * 0.1 + f2_giveUpBonus) * f2.stats.stamina * (1.2 - f2_energy_mod);
+      f1_current_stamina = Math.max(1, f1_current_stamina);
+      f2_current_stamina = Math.max(1, f2_current_stamina);
+
+      // Stamina modifiers
+      const f1_stam_mod = f1_current_stamina / (f1.stats.stamina * 10);
+      const f2_stam_mod = f2_current_stamina / (f2.stats.stamina * 10);
+
+      // Effective skills for this round
+      const eff_f1_striking = base_f1_striking * f1_stam_mod;
+      const eff_f1_grappling = base_f1_grappling * f1_stam_mod;
+      const eff_f2_striking = base_f2_striking * f2_stam_mod;
+      const eff_f2_grappling = base_f2_grappling * f2_stam_mod;
+
+      // PHASE 1 FIX: Style-based takedown preference
+      const f1_td_preference = this.getTakedownPreference(f1.style);
+      const f2_td_preference = this.getTakedownPreference(f2.style);
+      
+      // Determine who attempts takedown based on style and wrestling
+      const f1_td_likelihood = (f1.stats.wrestling + f1_td_preference) * (Math.random() * 0.5 + 0.75);
+      const f2_td_likelihood = (f2.stats.wrestling + f2_td_preference) * (Math.random() * 0.5 + 0.75);
+      
+      const td_attempter = f1_td_likelihood > f2_td_likelihood ? f1 : f2;
+      const td_defender = td_attempter === f1 ? f2 : f1;
+      
+      // Base takedown attempt chance modified by style
+      const attempter_style_mod = td_attempter === f1 ? f1_td_preference : f2_td_preference;
+      const base_td_chance = 0.3 + (attempter_style_mod / 10);
+      const skill_diff = (td_attempter.stats.wrestling - td_defender.stats.wrestling) / 10;
+      const td_attempt_chance = base_td_chance + skill_diff * 0.15;
+      
+      if (Math.random() < Math.max(0.1, Math.min(0.8, td_attempt_chance))) {
+        const td_attempter_stam_mod = td_attempter === f1 ? f1_stam_mod : f2_stam_mod;
+        const td_defender_stam_mod = td_defender === f1 ? f1_stam_mod : f2_stam_mod;
+        const td_success_chance = 0.5 + skill_diff * td_attempter_stam_mod - (1 - td_defender_stam_mod) * 0.2;
+        if (Math.random() < Math.min(0.85, Math.max(0.15, td_success_chance))) {
+          position = "ground";
+        }
+      }
+
+      if (position === "standing") {
+        // PHASE 1 FIX: Reduced damage variance (0.5-2.0x instead of 1-21x)
+        const damage_f1 = eff_f1_striking * (0.5 + Math.random() * 1.5) - f2.stats.durability * 0.2;
+        const damage_f2 = eff_f2_striking * (0.5 + Math.random() * 1.5) - f1.stats.durability * 0.2;
+        round_damage_f1 = Math.max(0, damage_f1);
+        round_damage_f2 = Math.max(0, damage_f2);
+
+        f2_health -= round_damage_f1;
+        f1_health -= round_damage_f2;
+
+        // Check for KO
+        if (f2_health <= 0) {
+          method = "KO";
+          finish_round = round;
+          finishPosition = "standing";
+          winner = f1;
+          loser = f2;
+          break;
+        }
+        if (f1_health <= 0) {
+          method = "KO";
+          finish_round = round;
+          finishPosition = "standing";
+          winner = f2;
+          loser = f1;
+          break;
+        }
+      } else {
+        // Ground: sub attempt or ground damage
+        const top = td_attempter;
+        const bottom = td_defender;
+        const top_grap = top === f1 ? eff_f1_grappling : eff_f2_grappling;
+        const bottom_grap = top === f1 ? eff_f2_grappling : eff_f1_grappling;
+        const top_stam = top === f1 ? f1_stam_mod : f2_stam_mod;
+        const bottom_stam = top === f1 ? f2_stam_mod : f1_stam_mod;
+
+        // PHASE 1 FIX: Skill-based submissions heavily favor jiujitsu
+        const top_jiujitsu = top.stats.jiujitsu;
+        const bottom_jiujitsu = bottom.stats.jiujitsu;
+        
+        // Style-based submission preference
+        const top_sub_preference = this.getSubmissionPreference(top.style);
+        
+        // Sub attempt chance: 20-80% based on jiujitsu skill
+        const sub_attempt_chance = 0.2 + (top_jiujitsu / 10) * 0.6 + (top_sub_preference / 10) * 0.2;
+        
+        if (Math.random() < Math.min(0.85, Math.max(0.1, sub_attempt_chance))) {
+          // Sub success scales with jiujitsu differential
+          const jiujitsu_diff = (top_jiujitsu - bottom_jiujitsu) / 10;
+          const sub_success_chance = 0.3 + jiujitsu_diff * 0.4 * top_stam - (1 - bottom_stam) * 0.2;
+          
+          if (Math.random() < Math.min(0.7, Math.max(0.05, sub_success_chance))) {
+            method = "SUB";
+            finish_round = round;
+            finishPosition = "ground";
+            winner = top;
+            loser = bottom;
+            break;
+          }
+        }
+
+        // PHASE 1 FIX: Reduced ground damage variance (0.4-1.6x instead of 1-16x)
+        const ground_damage = top_grap * (0.4 + Math.random() * 1.2) - bottom.stats.durability * 0.2;
+        const applied_damage = Math.max(0, ground_damage);
+        
+        if (bottom === f1) {
+          round_damage_f2 = applied_damage;
+          f1_health -= applied_damage;
+          if (f1_health <= 0) {
+            method = "KO";
+            finish_round = round;
+            finishPosition = "ground";
+            winner = f2;
+            loser = f1;
+            break;
+          }
+        } else {
+          round_damage_f1 = applied_damage;
+          f2_health -= applied_damage;
+          if (f2_health <= 0) {
+            method = "KO";
+            finish_round = round;
+            finishPosition = "ground";
+            winner = f1;
+            loser = f2;
+            break;
+          }
+        }
+      }
+
+      // Score the round based on damage
+      if (round_damage_f1 > round_damage_f2) {
+        f1_rounds_won++;
+      } else if (round_damage_f2 > round_damage_f1) {
+        f2_rounds_won++;
+      }
+    }
+
+    // If no finish, decide winner by rounds
+    if (method === "DEC") {
+      if (f1_rounds_won > f2_rounds_won) {
+        winner = f1;
+        loser = f2;
+      } else if (f2_rounds_won > f1_rounds_won) {
+        winner = f2;
+        loser = f1;
+      } else {
+        winner = Math.random() < 0.5 ? f1 : f2;
+        loser = winner === f1 ? f2 : f1;
+      }
+    }
+
+    // Update records
+    this.updateFighterRecords(winner, loser);
+    
+    // Apply morale changes
+    this.applyMoraleChanges(winner, loser, method, finish_round);
+
+    // PHASE 2: Generate detailed finish descriptions
+    let finishType: string | undefined;
+    let finishDetails: string | undefined;
+    let time: string | undefined;
+
+    if (method !== "DEC") {
+      const minutes = Math.floor(Math.random() * 5);
+      const seconds = Math.floor(Math.random() * 60);
+      time = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+
+      if (method === "KO") {
+        if (finishPosition === "standing") {
+          finishType = "KO";
+          finishDetails = this.selectKOMethod(winner);
+        } else {
+          finishType = "TKO";
+          finishDetails = this.selectTKOPosition();
+        }
+      } else if (method === "SUB") {
+        finishType = "Submission";
+        finishDetails = this.selectSubmission();
+      }
+    }
+
+    // Display string with detailed finish info
+    const display = method !== "DEC"
+      ? `${winner.name} def. ${loser.name} via ${finishType} - ${finishDetails} (R${finish_round} ${time})`
+      : `${winner.name} def. ${loser.name} via ${method}`;
+
+    // Calculate win streak (simple check on winner's record)
+    const [wins] = winner.record.split('-').map(Number);
+    const winStreak = wins >= 3 ? wins : 0;
+    
+    // Check if championship win
+    const isChampionshipWin = loser.isChampion || loser.isInterimChampion || false;
+    
+    // Calculate popularity changes and injuries
+    const popularityChanges = this.calculatePopularityChanges(winner, loser, method, isMainEvent, currentWeek, isChampionshipWin, winStreak);
+    const injuries = this.calculateInjuries(winner, loser, method, finish_round, currentWeek, recoverySpaLevel);
+
+    // Basic result
+    const basicResult: FightResult = {
+      winner,
+      loser,
+      method,
+      finishType,
+      finishDetails,
+      round: finish_round,
+      time,
+      display,
+      starRating: 0,
+      popularityChanges,
+      injuries
+    };
+
+    // Calculate star rating
+    const baseStarRating = FightRatingCalculator.calculateMatchRating(fighter1, fighter2, basicResult, isMainEvent, hype, eventProductionLevel, isPPV);
+    const boostedRating = baseStarRating + starBonus;
+    const clampedRating = Math.max(0.5, Math.min(5.0, Math.round(boostedRating * 2) / 2));
+
+    return { ...basicResult, starRating: clampedRating };
+  }
+
+  /**
+   * Get takedown preference modifier based on fighter style
+   */
+  private static getTakedownPreference(style?: FighterStyle): number {
+    if (!style) return 0;
+    
+    switch (style) {
+      case 'GP': return 6;  // Ground & Pound loves takedowns
+      case 'SA': return 7;  // Submission Artist loves takedowns even more
+      case 'CS': return -5; // Counter Striker avoids takedowns
+      case 'MT': return -4; // Muay Thai prefers standing
+      case 'BR': return 0;  // Brawler is neutral
+      default: return 0;
+    }
+  }
+
+  /**
+   * Get submission preference modifier based on fighter style
+   */
+  private static getSubmissionPreference(style?: FighterStyle): number {
+    if (!style) return 0;
+    
+    switch (style) {
+      case 'SA': return 7;  // Submission Artist heavily favors subs
+      case 'GP': return -3; // Ground & Pound prefers GnP over subs
+      case 'BR': return -2; // Brawler less likely to hunt subs
+      default: return 0;
+    }
+  }
+
+  /**
+   * Select KO method based on fighter's striking style
+   */
+  private static selectKOMethod(fighter: Fighter): string {
+    const kickboxing = fighter.stats.kickboxing || 5;
+    const boxing = fighter.stats.boxing || 5;
+    const kickProbability = kickboxing / (kickboxing + boxing);
+    
+    const isKick = Math.random() < kickProbability;
+    
+    if (isKick) {
+      return selectFromWeightedList(KICK_KO_METHODS);
+    } else {
+      return selectFromWeightedList(PUNCH_KO_METHODS);
+    }
+  }
+
+  /**
+   * Select TKO position for ground finishes
+   */
+  private static selectTKOPosition(): string {
+    return selectFromWeightedList(TKO_POSITIONS);
+  }
+
+  /**
+   * Select submission type
+   */
+  private static selectSubmission(): string {
+    return selectFromWeightedList(SUBMISSION_TYPES);
+  }
+
+  private static updateFighterRecords(winner: Fighter, loser: Fighter) {
+    const parseRecord = (record: string): { wins: number; losses: number; draws: number } => {
+      const parts = record.split('-');
+      return {
+        wins: parseInt(parts[0]) || 0,
+        losses: parseInt(parts[1]) || 0,
+        draws: parseInt(parts[2]) || 0
+      };
+    };
+
+    const winnerRecord = parseRecord(winner.record);
+    winnerRecord.wins += 1;
+    winner.record = `${winnerRecord.wins}-${winnerRecord.losses}-${winnerRecord.draws}`;
+
+    const loserRecord = parseRecord(loser.record);
+    loserRecord.losses += 1;
+    loser.record = `${loserRecord.wins}-${loserRecord.losses}-${loserRecord.draws}`;
+  }
+
+  private static calculatePopularityChanges(
+    winner: Fighter, 
+    loser: Fighter, 
+    method: "KO" | "SUB" | "DEC", 
+    isMainEvent: boolean, 
+    currentWeek: number,
+    isChampionshipWin: boolean = false,
+    winStreak: number = 0
+  ): { [fighterId: string]: { change: number; weekChanged: number } } {
+    const changes: { [fighterId: string]: { change: number; weekChanged: number } } = {};
+    
+    // WINNER POPULARITY CHANGES
+    let winnerChange = 0;
+    
+    // Base win bonus: 3-5
+    winnerChange += Math.floor(Math.random() * 3) + 3; // 3-5
+    
+    // Finish bonus (KO/SUB): +1-3
+    if (method === "KO" || method === "SUB") {
+      winnerChange += Math.floor(Math.random() * 3) + 1; // 1-3
+    }
+    
+    // Main event bonus: +1-5
+    if (isMainEvent) {
+      winnerChange += Math.floor(Math.random() * 5) + 1; // 1-5
+    }
+    
+    // Championship win bonus: +15
+    if (isChampionshipWin) {
+      winnerChange += 15;
+    }
+    
+    // Win streak bonus (3+ wins): +5 or +10
+    if (winStreak >= 3) {
+      winnerChange += winStreak >= 5 ? 10 : 5;
+    }
+    
+    const newWinnerPopularity = Math.max(1, Math.min(100, winner.popularity + winnerChange));
+    const actualWinnerChange = newWinnerPopularity - winner.popularity;
+    
+    if (actualWinnerChange !== 0) {
+      changes[winner.id] = {
+        change: actualWinnerChange,
+        weekChanged: currentWeek
+      };
+    }
+    
+    // LOSER POPULARITY CHANGES
+    let loserChange = 0;
+    
+    // Base loss penalty: -3 to -5
+    loserChange -= (Math.floor(Math.random() * 3) + 3); // -3 to -5
+    
+    // Finish loss penalty (KO/SUB): -1 to -3 additional
+    if (method === "KO" || method === "SUB") {
+      loserChange -= (Math.floor(Math.random() * 3) + 1); // -1 to -3
+    }
+    
+    const newLoserPopularity = Math.max(1, Math.min(100, loser.popularity + loserChange));
+    const actualLoserChange = newLoserPopularity - loser.popularity;
+    
+    if (actualLoserChange !== 0) {
+      changes[loser.id] = {
+        change: actualLoserChange,
+        weekChanged: currentWeek
+      };
+    }
+    
+    return changes;
+  }
+  
+  private static calculateInjuries(
+    winner: Fighter, 
+    loser: Fighter, 
+    method: "KO" | "SUB" | "DEC", 
+    round?: number, 
+    currentWeek: number = 1,
+    recoverySpaLevel: number = 1
+  ): { [fighterId: string]: { type: "minor" | "major"; name: string; weeksRemaining: number; weekInjured: number } } {
+    const injuries: { [fighterId: string]: { type: "minor" | "major"; name: string; weeksRemaining: number; weekInjured: number } } = {};
+
+    let injuryReduction = 0;
+    if (recoverySpaLevel >= 6) {
+      injuryReduction = 0.50;
+    } else if (recoverySpaLevel >= 4) {
+      injuryReduction = 0.40;
+    } else if (recoverySpaLevel >= 2) {
+      injuryReduction = 0.20;
+    }
+
+    let loserProbs;
+    if (method === "KO" || method === "SUB") {
+      loserProbs = INJURY_PROBABILITIES.LOSER_KO_SUB;
+    } else {
+      loserProbs = INJURY_PROBABILITIES.LOSER_DECISION;
+    }
+
+    const loserMajorProb = loserProbs.major * (1 - injuryReduction);
+    const loserMinorProb = loserProbs.minor * (1 - injuryReduction);
+
+    const loserMajorRoll = Math.random();
+    const loserMinorRoll = Math.random();
+
+    if (loserMajorRoll < loserMajorProb) {
+      const injury = InjuryManager.generateInjury("major", currentWeek);
+      injuries[loser.id] = injury;
+      
+      const updatedLoser = InjuryManager.applyDurabilityLoss(loser);
+      if (updatedLoser.stats.durability !== loser.stats.durability) {
+        loser.stats.durability = updatedLoser.stats.durability;
+      }
+    } else if (loserMinorRoll < loserMinorProb) {
+      const injury = InjuryManager.generateInjury("minor", currentWeek);
+      injuries[loser.id] = injury;
+    }
+
+    let winnerProbs;
+    if (method === "DEC" || round === 3) {
+      winnerProbs = INJURY_PROBABILITIES.WINNER_LATE;
+    } else {
+      winnerProbs = INJURY_PROBABILITIES.WINNER_EARLY;
+    }
+
+    const winnerMajorProb = winnerProbs.major * (1 - injuryReduction);
+    const winnerMinorProb = winnerProbs.minor * (1 - injuryReduction);
+
+    const winnerMajorRoll = Math.random();
+    const winnerMinorRoll = Math.random();
+
+    if (winnerMajorRoll < winnerMajorProb) {
+      const injury = InjuryManager.generateInjury("major", currentWeek);
+      injuries[winner.id] = injury;
+      
+      const updatedWinner = InjuryManager.applyDurabilityLoss(winner);
+      if (updatedWinner.stats.durability !== winner.stats.durability) {
+        winner.stats.durability = updatedWinner.stats.durability;
+      }
+    } else if (winnerMinorRoll < winnerMinorProb) {
+      const injury = InjuryManager.generateInjury("minor", currentWeek);
+      injuries[winner.id] = injury;
+    }
+
+    return injuries;
+  }
+
+  private static applyMoraleChanges(winner: Fighter, loser: Fighter, method: "KO" | "SUB" | "DEC", round?: number) {
+    const getAgeResistance = (age: number): number => {
+      if (age >= 35) return 0.5;
+      if (age >= 32) return 0.3;
+      return 0;
+    };
+
+    const winnerAgeResistance = getAgeResistance(winner.age);
+    const loserAgeResistance = getAgeResistance(loser.age);
+
+    let winnerMoraleGain = 0.5 + Math.random();
+    if (method === "KO" || method === "SUB") {
+      winnerMoraleGain += 0.2;
+    }
+    if (round && round <= 2) {
+      winnerMoraleGain += 0.1;
+    }
+    
+    winnerMoraleGain *= (1 - winnerAgeResistance);
+    winnerMoraleGain = Math.max(0.5, Math.min(1.5, Math.round(winnerMoraleGain * 2) / 2));
+    winner.morale = Math.max(0, Math.min(10, winner.morale + winnerMoraleGain));
+
+    let loserMoraleLoss = 0.5 + Math.random();
+    if (method === "KO" || method === "SUB") {
+      loserMoraleLoss += 0.3;
+    }
+    
+    loserMoraleLoss *= (1 - loserAgeResistance);
+    loserMoraleLoss = Math.max(0.5, Math.min(1.5, Math.round(loserMoraleLoss * 2) / 2));
+    loser.morale = Math.max(0, Math.min(10, loser.morale - loserMoraleLoss));
+  }
+}
