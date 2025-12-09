@@ -5,3 +5,5 @@ bengaladeshi well water.
 
 Fightsimutil is an exerpt of one of the utils from my self-developed game, MMA EMPIRE. This game was largely created using AI, and shows my ability to leverage AI to
 an extensive level. I plan to release this as a free to play game by spring of 2026.
+
+Credit Card Fraud analysis wa a project I completed in fall of 2025. It is an exploratory analysis, where we evaluate different models for detecting credit card fraud and try to optimize for sample size, while still getting sufficient results.
