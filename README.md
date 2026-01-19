@@ -10,5 +10,7 @@ Longitudinal Data Analysis final was a final report for a course where we wanted
 
 The exploritory well data was a final project i submitted for a computational methods class. in it, I use logestic regression and iterative functions to explore a dataset on bengaladeshi well water. this was another project that was heavily directed and told us what models we should be using.
 
+Average Player Index (API) was one of my first coding projects, so the code itself is a bit janky, however, it is one of the most interesting projects to me. My roommate and I used regression from the mean to determine which NBA player is the most average, based on their statistical performance. the scale works such that a player who has the league average in every single stat would have a score of 0, this means that the player closest to 0 is the most average. in our study of the 2021 nba season, Shake Milton was the most average with a score .193, while Nikola Jokic was the leaser average with a score of 2.26.
+
 
 Fightsimutil is an exerpt of one of the utils from my self-developed game, MMA EMPIRE. This game was largely created using AI, and shows my ability to leverage AI to an extensive level. I plan to release this as a free to play game by spring of 2026.
