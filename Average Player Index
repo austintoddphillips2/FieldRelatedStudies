@@ -1,0 +1,87 @@
+/*Austin Phillips group assignment*/
+/*I certify that the SAS code given is my original and exclusive work*/ 
+data NbaStats ;
+Infile '/home/u60637551/OLD/In class Data/nba pt 2.csv' delimiter="," ;
+length name $ 25 ;
+Input Name $ Team $ Pos $ GP MPG PPG RPG APG SPG BPG TOPG;
+STDMPG = abs(mpg - 22.68)/8.34 ;
+STDPPG = abs(ppg - 10.23)/6.17 ;
+STDRPG = abs(rpg - 4.21)/2.43 ;
+STDAPG = abs(apg - 2.27)/1.92 ;
+STDSPG = abs(spg - 0.72)/0.39 ;
+STDBPG = abs(bpg - 0.46)/0.41 ;
+STDTOPG = abs(TOPG - 1.24)/0.85 ;
+API = ( STDMPG + STDPPG + STDRPG + STDAPG + STDSPG + STDBPG + STDTOPG )/7 ;
+
+;
+
+If GP < 20 then delete;
+run;
+proc sort data=nbastats ;
+by API ; 
+proc print data=NbaStats(keep=name team pos API)  ;
+ods text = "part a categorical graphs";
+run;
+title "Amount of Players per Position" ;
+proc sgplot data=nbastats;
+vbar pos/stat=freq datalabel
+fillattrs=(color=green);
+run;
+title "Amount of Players per Team" ;
+proc sgplot data=nbastats;
+vbar team/stat=freq
+fillattrs=(color=blue);
+run;
+ods text = "part b single variable graphs";
+
+title "Histogram of Points per Game" ;
+proc sgplot data=nbastats;
+histogram ppg / binstart=0 binwidth=5 
+fillattrs=(color=blue);
+
+title "Histogram of Minutes per Game" ;
+proc sgplot data=nbastats;
+histogram mpg / binstart=0 binwidth=5 
+fillattrs=(color=blue);
+run;
+title "Histogram of Average Player Index" ;
+proc sgplot data=nbastats;
+histogram api / binstart=0 binwidth=.2 
+fillattrs=(color=blue);
+
+ods text = "part c 2 variable graphs" ;
+run;
+title "API by Position" ;
+proc sgplot data=nbastats;
+ vbox api/ category=pos ;
+ run;
+title "API by Team" ;
+proc sgplot data=nbastats;
+ vbox api/ category=team ;
+ run;
+
+title "MPG vs API" ;
+proc sgscatter data=nbastats;
+plot API*mpg;
+run ;
+title;
+ods text= "part 3 - tables" ;
+
+ods text = "single variable tables" ;
+run;
+
+proc means data = nbastats (Keep=api) ;
+run;
+ods text = "multi variable table" ;
+proc freq data=nbastats ;
+table pos*team ;
+
+proc sort data=nbastats ;
+by pos ;
+run;
+
+proc means data=nbastats (keep= Pos mpg ppg apg rpg spg bpg topg);
+by Pos;
+
+proc corr data=nbastats ;
+var mpg api ;
