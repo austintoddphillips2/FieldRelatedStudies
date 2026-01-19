@@ -1,0 +1,391 @@
+/* final Austin Phillips*/
+proc import datafile="/home/u60637551/STA5197/finaldata.txt"
+    out=work.cholesterol
+    dbms=csv
+    replace;
+    getnames=yes;
+run;
+
+
+
+/*a*/
+
+
+
+proc means data=cholesterol n mean std min max;
+    by Group;
+    var month0 month6 month12 month20 month24;
+run;
+
+proc means data=cholesterol nmiss;
+	by group;
+    var month0 month6 month12 month20 month24;
+run;
+
+/*restructure data*/
+data long;
+    set cholesterol;
+    array chol[*] month0 month6 month12 month20 month24;
+    array months[5] _temporary_ (0 6 12 20 24);
+    
+    subject + 1;
+    do i = 1 to dim(chol);
+        month = months[i];
+        cholesterol = chol[i];
+        if missing(cholesterol) then miss = 1; else miss = 0;
+        output;
+    end;
+    keep subject Group Group month cholesterol miss;
+run;
+
+proc sgplot data=long;
+    vline month / response=cholesterol stat=mean 
+                  group=Group  
+                  markers markerattrs=(size=3mm) datalabel;
+    title 'Mean Cholesterol by Treatment Group';
+run;
+
+proc sgpanel data=long noautolegend;
+    panelby Group;
+    series x=month y=cholesterol / group=subject lineattrs=(thickness=1);
+    title 'Speggehti Plot';
+run;
+
+proc sgpanel data=long;
+    panelby month / columns=5 layout=columnlattice;
+    vbox cholesterol / category=Group;
+    title 'Box Plots at Each Time Point by Treatment Group';
+run;
+
+
+
+/*b*/
+
+
+
+/* number summaries*/
+
+proc means data=cholesterol n nmiss;
+    class Group;
+    var month0 month6 month12 month20 month24;
+    title 'Missing Data Summary by Treatment Group';
+run;
+
+proc freq data=cholesterol;
+    tables month0 month6 month12 month20 month24 / missing nocum;
+    by Group;
+    title 'Frequency of Missing Values by Treatment Group';
+run;
+
+/* dropout data*/
+data dropout;
+    set cholesterol;
+    if not missing(month24) then do;
+        Y24 = month24;
+        dropout_group = 'Completed';
+    end;
+    else do;
+        Y24 = month24;
+        dropout_group = 'Dropout';
+    end;
+    keep Group ID Y24 dropout_group month0 month6 month12 month20 month24;
+run;
+
+data dropout2;
+    set dropout;
+    lastmonth = 24;
+    if dropout_group = 'Dropout' then do;
+        if not missing(month20) then do;
+            twoprior = month12;
+            prior = month20;
+            lastmonth = 20;
+        end;
+        else if missing(month20) and not missing(month12) then do;
+            twoprior = month6;
+            prior = month12;
+            lastmonth = 12;
+        end;
+        else if missing(month12) and not missing(month6) then do;
+            twoprior = month0;
+            prior = month6;
+            lastmonth = 6;
+        end;
+        else do;
+            twoprior = .;
+            prior = month0;
+            lastmonth = 0;
+        end;
+    end;
+    if dropout_group = 'Completed' then do;
+        twoprior = month20;
+        prior = month24;
+    end;
+    keep Group ID Y24 dropout_group twoprior prior lastmonth;
+run;
+
+data dropout3;
+    set dropout2;
+    if dropout_group = 'Dropout' then binary = 0;
+    else binary = 1;
+run;
+
+/* Log reg model*/
+proc logistic data=dropout3 descending;
+    class Group;
+    model binary = Group prior twoprior;
+run;
+
+
+
+/*c*/
+
+
+
+/* create new dropout data w identifier*/
+data dropout_time;
+    set cholesterol;
+    array chol[5] month0 month6 month12 month20 month24;
+    array months[5] _temporary_ (0 6 12 20 24);
+    
+    subject = _N_;
+    
+    /*find missing */
+    do j = 1 to 5;
+        month = months[j];
+        Y = chol[j];
+        
+        /* identifies missing*/
+        if not missing(Y) then R = 1;
+        else R = 0;
+        
+        /*find level & trend*/
+        if j = 1 then do;
+            level = Y;
+            trend = .;
+            prior_Y = Y;
+        end;
+        else do;
+            level = Y;
+            trend = Y - prior_Y;
+            prior_Y = Y;
+        end;
+        
+        /*find if droupout */
+        if j < 5 then do;
+            if not missing(chol[j+1]) then R_next = 1;
+            else R_next = 0;
+        end;
+        else R_next = .;
+        
+        output;
+        
+        /*update y */
+        if missing(Y) then prior_Y = prior_Y;
+        else prior_Y = Y;
+    end;
+    
+    keep Group subject month Y R R_next level trend;
+run;
+
+/* drop last time point */
+data dropout_predict;
+    set dropout_time;
+    where not missing(R_next) and not missing(level);
+run;
+
+
+/* log reg*/
+data dropout_predict2;
+    set dropout_predict;
+    where not missing(trend);
+run;
+
+proc logistic data=dropout_predict2 descending;
+    class Group;
+    model R_next = Group level trend;
+run;
+
+/*data summary*/
+proc means data=dropout_predict2 n mean std min max;
+    class R_next;
+    var level trend;
+run;
+
+
+
+/*d*/
+
+/*find dropout time */
+data dropout_pattern;
+    set cholesterol;
+    subject = _N_;
+
+    if missing(month6) then first_missing = 6;
+    else if missing(month12) then first_missing = 12;
+    else if missing(month20) then first_missing = 20;
+    else if missing(month24) then first_missing = 24;
+    else first_missing = 99;  
+    
+    if first_missing = 6 then dropout_pattern = 'Dropout at 6mo';
+    else if first_missing = 12 then dropout_pattern = 'Dropout at 12mo';
+    else if first_missing = 20 then dropout_pattern = 'Dropout at 20mo';
+    else if first_missing = 24 then dropout_pattern = 'Dropout at 24mo';
+    else dropout_pattern = 'Completed';
+run;
+/* drop non-monotone missing */
+data dropout_pattern2;
+set dropout_pattern;
+if first_missing = 12 and not missing(month24) then delete;
+run;
+
+/*long data*/
+data long_pattern;
+    set dropout_pattern2;
+    array chol[*] month0 month6 month12 month20 month24;
+    array months[5] _temporary_ (0 6 12 20 24);
+    
+    do i = 1 to dim(chol);
+        month = months[i];
+        cholesterol = chol[i];
+        if missing(cholesterol) then miss = 1; else miss = 0;
+        output;
+    end;
+    keep subject Group dropout_pattern first_missing month cholesterol miss;
+run;
+
+/* means by dropout time plot*/
+proc sgplot data=long_pattern;
+    vline month / response=cholesterol stat=mean
+                  group=dropout_pattern lineattrs=(thickness=2)
+                  markers markerattrs=(size=3mm) datalabel;
+    title 'Mean cholesterol by dropout time';
+run;
+
+
+/*e*/
+
+
+
+/* restructure data around month 24*/
+data long24;
+    set long;
+    time_c = month - 24;   
+run;
+
+/*mixed model un structure random intercept and slope*/
+proc mixed data=long24 method=ml;
+    class subject Group;
+    model cholesterol = Group time_c Group*time_c / solution;
+    random intercept time_c / subject=subject type=un;
+    lsmeans Group / at time_c=0 cl diff;  
+run;
+
+
+
+/*f*/
+
+
+/* creade prediction output*/
+proc mixed data=long24 method=ml plots=residualpanel;
+    class subject Group;
+    model cholesterol = Group time_c Group*time_c / solution outp=pred;
+    random intercept time_c/ subject=subject;
+run;
+
+/*residual data*/
+data resid;
+    set pred;
+    resid = cholesterol - Pred;
+    keep subject Group month cholesterol Pred resid;
+run;
+
+/* plot resid*/
+proc sgpanel data=resid;
+    panelby Group / columns=2 layout=columnlattice;
+    scatter x=month y=resid ;
+    loess x=month y=resid /  lineattrs=(color=red);
+    title 'Residuals by Treatment Group';
+run;
+
+/*variogram*/
+proc variogram data=resid;
+    compute lagd =5 maxlag=5;
+    coordinates xc=month yc=subject;
+    var resid;
+run;
+
+
+/*g*/
+proc mixed data=long24 method=ml;
+    class subject Group;
+    model cholesterol = Group time_c Group*time_c / solution;
+    random intercept / subject=subject type=cs;
+    lsmeans Group / at time_c=0 cl diff;  
+proc mixed data=long24 method=ml;
+    class subject Group;
+    model cholesterol = Group time_c Group*time_c / solution;
+    random intercept / subject=subject type=vc ;
+    lsmeans Group / at time_c=0 cl diff;  
+   
+    
+/*h*/
+
+proc genmod data=long24 descending;
+   class subject Group month(ref="0");
+   model cholesterol = Group month Group*month / dist=normal link=id;
+   repeated subject=subject / type=exch corrw modelse;   
+run;
+
+
+/*i*/ 
+proc mcmc data=long24 seed=5235 nmc=20000 outpost=outMixed;
+parms B0-B3;
+prior B0: ~ normal(235, var=7);
+prior B1: ~ normal(-9.9, var=9.01);
+prior B2: ~ normal(7.24, var=5.1);
+prior B3: ~ normal(12.2, var=.6);
+random Gamma ~ normal(0,var=.73) subject=subject;
+Mu = B0 + B1*Group + B2*Month + B3*(Group*Month) + Gamma;
+model cholesterol ~ normal(Mu,var=1);
+run;
+
+data priorsim;
+    
+    do simulation = 1 to 5;
+        B0 = 235 + rand('normal') * sqrt(7);
+        B1 = -9.9 + rand('normal') * sqrt(9.01);
+        B2 = 7.24 + rand('normal') * sqrt(5.1);
+        B3 = 12.2 + rand('normal') * sqrt(0.6);
+        
+        do Group = 1 to 2;
+            do subject = 1 to 10;
+                Gamma = rand('normal') * sqrt(0.73);
+                
+                do month = 0, 6, 12, 20;
+                    Mu = B0 + B1*Group + B2*month + B3*(Group*month) + Gamma;
+                    cholesterol = Mu + rand('normal') * sqrt(1);
+                    output;
+                end;
+            end;
+        end;
+    end;
+    
+    keep simulation subject Group month cholesterol;
+run;
+
+proc sgplot data=priorsim;
+    where Group = 1;
+    series x=month y=cholesterol / group=subject 
+                                   lineattrs=(thickness=1);
+    title 'Predicted Priors (active)';
+run;
+
+proc sgplot data=priorsim;
+    where Group = 2;
+    series x=month y=cholesterol / group=subject 
+                                   lineattrs=(thickness=1);
+    title 'Predicted priors (placebo)';
+run;
+
+/*j*/
+
